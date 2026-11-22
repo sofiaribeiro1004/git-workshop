@@ -3,9 +3,7 @@
 import json
 import re
 import csv
-import html
 from collections import Counter
-from typing import Optional
 
 import requests
 import typer
@@ -247,34 +245,18 @@ def _get_type_exercise_by_id(exercise_id: int) -> str:
     )
     return effort_type
 
-def _clean_html(text: str) -> str:
-    """Remove as tags HTML e entidades (&amp;, &nbsp;...) de uma descrição."""
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
- 
- 
 def _get_description(exercise: dict[str, object]) -> str:
-    """Devolve a descrição em inglês do exercício, já sem HTML."""
-    translations = exercise.get("translations")
-    if isinstance(translations, list):
-        for translation in translations:
-            if not isinstance(translation, dict) or translation.get("language") != 2:
-                continue
-            for key in ("description_source", "description"):
-                text = translation.get(key)
-                if isinstance(text, str) and text.strip():
-                    return _clean_html(text)
+    """Devolve a descrição em inglês do exercício (o mesmo campo que a alínea C usa)."""
+    for translation in exercise.get("translations", []):
+        if translation.get("language") == 2:
+            return translation.get("description_source") or ""
     return ""
- 
- 
+
 def _matches_search(exercise: dict[str, object], term: str) -> bool:
     """Mesmo critério da alínea B): o termo aparece na categoria ou num músculo."""
-    term = term.casefold()
     searchable_values = [_get_category(exercise), *_get_muscles(exercise)]
     return any(term in value.casefold() for value in searchable_values)
- 
- 
+
 def _classify_effort(exercise: dict[str, object]) -> str:
     """Mesmas regras da alínea C), numa função reutilizável."""
     muscles = _get_muscles(exercise)
@@ -284,11 +266,8 @@ def _classify_effort(exercise: dict[str, object]) -> str:
     if re.search(r"\b(isolated|isolation|single-joint)\b", description) or len(muscles) == 1:
         return "isolated"
     return "other"
- 
- 
+
 # D)
- 
-# Uma regex por equipamento: apanha singular/plural e variantes de escrita.
 EQUIPMENT_PATTERNS = {
     "barbell": re.compile(r"\bbarbells?\b", re.IGNORECASE),
     "dumbbell": re.compile(r"\bdumb[- ]?bells?\b", re.IGNORECASE),
@@ -301,8 +280,7 @@ EQUIPMENT_PATTERNS = {
     "ez bar": re.compile(r"\bez[- ]?(?:curl[- ]?)?bars?\b", re.IGNORECASE),
     "pull-up bar": re.compile(r"\b(?:pull|chin)[- ]?up bars?\b", re.IGNORECASE),
 }
- 
- 
+
 def _count_equipment(exercises: list[dict[str, object]]) -> list[dict[str, int]]:
     """Conta as menções a cada equipamento nas descrições dos exercícios."""
     counter = Counter()
@@ -314,21 +292,18 @@ def _count_equipment(exercises: list[dict[str, object]]) -> list[dict[str, int]]
                 counter[equipment_name] += occurrences
     # most_common() devolve por ordem decrescente de ocorrências
     return [{name: count} for name, count in counter.most_common()]
- 
- 
+
 @app.command()
 def equipment(
     category: str = typer.Argument(..., help="Nome da categoria, ex: chest"),
 ) -> None:
     """Conta menções a equipamento nas descrições dos exercícios de uma categoria."""
-    category = category.strip()
     all_exercises = get_exerciseinfo()
     selected = [
         exercise
         for exercise in all_exercises
         if _get_category(exercise).casefold() == category.casefold()
     ]
- 
     if not selected:
         available = sorted({_get_category(e) for e in all_exercises} - {"Unknown"})
         typer.echo(
@@ -336,12 +311,10 @@ def equipment(
             err=True,
         )
         raise typer.Exit(code=1)
- 
-    typer.echo(json.dumps(_count_equipment(selected), indent=4, ensure_ascii=False))
- 
- 
+
+    typer.echo(json.dumps(_count_equipment(selected), indent=4))
+
 # E)
- 
 def _build_workout(
     exercises: list[dict[str, object]], groups: list[str], effort: str, n: int
 ) -> dict[str, list[dict[str, object]]]:
@@ -354,15 +327,12 @@ def _build_workout(
                 break
             if not _matches_search(exercise, group):          # alínea B)
                 continue
-            name = _get_name(exercise)
-            if name == "Unknown":                              # sem nome em inglês
-                continue
             effort_type = _classify_effort(exercise)          # alínea C)
             if effort != "any" and effort_type != effort:
                 continue
             selected.append(
                 {
-                    "name": name,
+                    "name": _get_name(exercise),
                     "type": effort_type,
                     "category": _get_category(exercise),
                     "muscles": _get_muscles(exercise),
@@ -373,8 +343,7 @@ def _build_workout(
             typer.echo(f"Aviso: nenhum exercício encontrado para '{group}'.", err=True)
         plan[group] = selected
     return plan
- 
- 
+
 def _export_csv(plan: dict[str, list[dict[str, object]]], path: str) -> int:
     """Escreve o plano num CSV (uma linha por exercício) e devolve o nº de registos."""
     fields = ["group", "name", "type", "category", "muscles", "equipment"]
@@ -385,8 +354,7 @@ def _export_csv(plan: dict[str, list[dict[str, object]]], path: str) -> int:
         for group, exercises in plan.items():
             for exercise in exercises:
                 writer.writerow(
-                    {
-                        **exercise,
+                    exercise | {
                         "group": group,
                         # uma célula de CSV não guarda listas, por isso juntamos
                         "muscles": "; ".join(exercise["muscles"]),
@@ -395,44 +363,37 @@ def _export_csv(plan: dict[str, list[dict[str, object]]], path: str) -> int:
                 )
                 records += 1
     return records
- 
- 
+
 @app.command()
 def workout(
     groups: str = typer.Argument(..., help="Músculos/categorias separados por vírgula, ex: biceps,back"),
     effort: str = typer.Argument(..., help="compound, isolated ou any"),
     n: int = typer.Argument(..., min=1, help="Máximo de exercícios por músculo/categoria"),
-    csv_file: Optional[str] = typer.Option(None, "--csv", help="Exporta o plano para CSV"),
+    csv: str | None = None,
 ) -> None:
     """Gera um plano de treino personalizado."""
-    effort = effort.strip().casefold()
+    effort = effort.casefold()
     if effort not in ("compound", "isolated", "any"):
         typer.echo("O tipo de esforço tem de ser: compound, isolated ou any.", err=True)
         raise typer.Exit(code=1)
- 
-    group_list: list[str] = []
-    for g in groups.split(","):
-        g = g.strip().casefold()
-        if g and g not in group_list:      # ignora vazios e repetidos
-            group_list.append(g)
+
+    group_list = [g.strip().casefold() for g in groups.split(",") if g.strip()]
     if not group_list:
         typer.echo("Indica pelo menos um músculo ou categoria.", err=True)
         raise typer.Exit(code=1)
- 
+
     # Os dados são pedidos à API uma única vez e usados para todos os grupos.
     plan = _build_workout(get_exerciseinfo(), group_list, effort, n)
- 
-    if csv_file:
+
+    if csv:
         try:
-            records = _export_csv(plan, csv_file)
+            records = _export_csv(plan, csv)
         except OSError as error:
-            typer.echo(f"Não foi possível escrever '{csv_file}': {error}", err=True)
+            typer.echo(f"Não foi possível escrever '{csv}': {error}", err=True)
             raise typer.Exit(code=1) from error
-        typer.echo(f"Ficheiro exportado: {csv_file} ({records} registos)")
+        typer.echo(f"Ficheiro exportado: {csv} ({records} registos)")
     else:
         typer.echo(json.dumps(plan, indent=4, ensure_ascii=False))
 
- 
- 
 if __name__ == "__main__":
     app()
